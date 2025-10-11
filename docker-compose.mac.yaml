@@ -1,0 +1,118 @@
+# Docker Compose 配置文件 - 适用于 MacBook M4 (ARM64)
+# 使用 Pipeline 模式，不需要 GPU 支持
+# 使用方法: docker-compose -f docker-compose.mac.yaml up -d
+
+services:
+  frontend:
+    image: lpdswing/mineru-web-frontend:v2.5.4.1
+    platform: linux/arm64  # 指定 ARM64 架构
+    ports:
+      - "8088:80"
+    depends_on:
+      - backend
+      - minio
+    networks:
+      - mineru-network
+    restart: unless-stopped
+
+  backend:
+    # 使用本地构建的 ARM64 镜像（Pipeline 模式专用）
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.mac
+    image: mineru-web-backend-mac:latest
+    platform: linux/arm64  # 指定 ARM64 架构
+    # 移除 GPU 配置 - Mac M4 不支持 NVIDIA CUDA
+    environment:
+      - REDIS_HOST=redis
+      - MINIO_ENDPOINT=${MINIO_ENDPOINT:-minio:9000}
+      - DATABASE_URL=sqlite:///./mineru.db
+      # Pipeline 模式配置 - 不需要 GPU
+      - BACKEND=pipeline
+      - PRELOAD_MODEL=false  # 不预加载 VLM 模型
+    volumes:
+      - ./backend:/app
+      - ./mineru.json:/root/mineru.json
+      - ./models2.0:/models
+    depends_on:
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    networks:
+      - mineru-network
+    restart: unless-stopped
+
+  worker:
+    # 使用本地构建的 ARM64 镜像（Pipeline 模式专用）
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.mac
+    image: mineru-web-backend-mac:latest
+    platform: linux/arm64  # 指定 ARM64 架构
+    command: python3 run_worker.py
+    # 移除 GPU 配置 - Mac M4 不支持 NVIDIA CUDA
+    environment:
+      - REDIS_HOST=redis
+      - MINIO_ENDPOINT=${MINIO_ENDPOINT:-minio:9000}
+      - DATABASE_URL=sqlite:///./mineru.db
+      # Pipeline 模式，不需要 VLM server
+    volumes:
+      - ./backend:/app
+      - ./mineru.json:/root/mineru.json
+      - ./models2.0:/models
+    depends_on:
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    networks:
+      - mineru-network
+    restart: unless-stopped
+
+  redis:
+    image: redis:latest
+    platform: linux/arm64  # 指定 ARM64 架构
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - mineru-network
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:RELEASE.2024-12-18T13-15-44Z
+    platform: linux/arm64  # 指定 ARM64 架构
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - minio_data:/data
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    networks:
+      - mineru-network
+    restart: unless-stopped
+
+volumes:
+  minio_data:
+  redis_data:
+
+networks:
+  mineru-network:
+    driver: bridge
+

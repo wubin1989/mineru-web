@@ -13,7 +13,8 @@ from mineru.cli.fast_api import parse_pdf
 BACKEND = os.environ.get("BACKEND", "vllm-client")
 MODEL_PATH = os.environ.get("MODEL_PATH", "/models/vlm")
 SERVER_URL = os.environ.get("SERVER_URL", "http://127.0.0.1:30000")
-PRELOAD_MODEL = os.environ.get("PRELOAD_MODEL", False)
+# 正确解析布尔值环境变量
+PRELOAD_MODEL = os.environ.get("PRELOAD_MODEL", "false").lower() in ("true", "1", "yes")
 
 def clean_memory():
     if torch.cuda.is_available():
@@ -23,11 +24,12 @@ def clean_memory():
 
 @asynccontextmanager
 async def life_span(app: FastAPI):
-    if not PRELOAD_MODEL:
-        print("🔄 不预加载模型...")
+    # Pipeline 模式不需要预加载模型
+    if BACKEND == "pipeline" or not PRELOAD_MODEL:
+        print(f"🔄 使用 {BACKEND} 模式，不预加载模型...")
         app.state.predictor = None
     else:
-        print("🔄 正在加载模型...")
+        print(f"🔄 使用 {BACKEND} 模式，正在加载模型...")
         from mineru.backend.vlm.vlm_analyze import ModelSingleton
 
         app.state.predictor = ModelSingleton().get_model(BACKEND, MODEL_PATH, SERVER_URL)

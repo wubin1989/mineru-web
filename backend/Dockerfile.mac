@@ -1,0 +1,68 @@
+# Dockerfile for Mac M4 (ARM64) - Pipeline Mode Only
+# 轻量级版本，不包含 vLLM 依赖
+
+FROM python:3.10-slim
+
+# 配置 Debian/Ubuntu APT 镜像源（使用阿里云镜像）
+RUN sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debian.sources || \
+    sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list || true
+
+# 安装系统依赖
+# libgl1: OpenCV 需要
+# fonts-noto-*: 中文字体支持
+# curl: 健康检查
+RUN apt-get update && \
+    apt-get install -y \
+        fonts-noto-core \
+        fonts-noto-cjk \
+        fontconfig \
+        libgl1 \
+        libglib2.0-0 \
+        libsm6 \
+        libxext6 \
+        libxrender-dev \
+        curl \
+        && \
+    fc-cache -fv && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# 复制依赖文件
+COPY requirements.txt .
+
+# 创建专门的 requirements 文件（不包含 vLLM）
+RUN echo "mineru[core]" > requirements.mac.txt && \
+    echo "alembic==1.16.1" >> requirements.mac.txt && \
+    echo "minio==7.2.15" >> requirements.mac.txt && \
+    echo "SQLAlchemy==2.0.41" >> requirements.mac.txt && \
+    echo "redis" >> requirements.mac.txt && \
+    echo "fastapi" >> requirements.mac.txt && \
+    echo "uvicorn[standard]" >> requirements.mac.txt && \
+    echo "python-multipart" >> requirements.mac.txt
+
+# 配置 pip 使用清华大学镜像源
+RUN python3 -m pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple && \
+    python3 -m pip config set install.trusted-host pypi.tuna.tsinghua.edu.cn
+
+# 安装 Python 依赖
+RUN python3 -m pip install --no-cache-dir -U pip && \
+    python3 -m pip install --no-cache-dir -r requirements.mac.txt && \
+    rm requirements.mac.txt
+
+# 复制应用代码和启动脚本
+COPY . .
+RUN chmod +x /app/entrypoint.sh
+
+# 设置环境变量
+ENV PYTHONUNBUFFERED=1
+ENV BACKEND=pipeline
+ENV PRELOAD_MODEL=false
+
+# 设置入口点
+ENTRYPOINT ["/app/entrypoint.sh"]
+
+# 启动命令
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+
