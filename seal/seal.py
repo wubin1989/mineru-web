@@ -2,52 +2,129 @@ import json
 import fitz  # PyMuPDF
 import io
 import traceback
+import argparse
+import time
 from pathlib import Path
 from PIL import Image
 from paddlex import create_pipeline
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 
-pdf_path = "招股书.pdf"
-output_dir = Path("./output")
+def parse_args():
+    """解析命令行参数"""
+    parser = argparse.ArgumentParser(description='PDF印章识别和裁剪工具')
+    parser.add_argument('--pdf', type=str, default='招股书.pdf', 
+                        help='输入PDF文件路径 (默认: 招股书.pdf)')
+    parser.add_argument('--output', type=str, default='./output', 
+                        help='输出目录路径 (默认: ./output)')
+    parser.add_argument('--zoom', type=float, default=2.0, 
+                        help='PDF转图片的缩放倍数 (默认: 2.0)')
+    parser.add_argument('--max-workers', type=int, default=4, 
+                        help='并发处理的最大线程数 (默认: 4)')
+    parser.add_argument('--use-orientation', action='store_true', 
+                        help='是否使用文档方向分类 (默认: False)')
+    parser.add_argument('--use-unwarping', action='store_true', 
+                        help='是否使用文档矫正 (默认: False)')
+    return parser.parse_args()
+
+# 解析命令行参数
+args = parse_args()
+
+# 记录程序开始时间
+program_start_time = time.time()
+
+pdf_path = args.pdf
+output_dir = Path(args.output)
 output_dir.mkdir(exist_ok=True)
 
 # 创建临时图片目录
 temp_images_dir = output_dir / "temp_pdf_images"
 temp_images_dir.mkdir(exist_ok=True)
 
-# ==================== 第一步：将PDF每一页导出为图片 ====================
+# ==================== 第一步：将PDF每一页导出为图片（多线程并行）====================
+step1_start_time = time.time()
 print("=" * 60)
-print("第一步：将PDF每一页导出为图片")
+print("第一步：将PDF每一页导出为图片（多线程并行）")
 print("=" * 60)
 
 pdf_document = fitz.open(pdf_path)
-page_images = []  # 保存导出的图片路径
-
-for page_num in range(len(pdf_document)):
-    page = pdf_document[page_num]
-    
-    # 使用较高的分辨率导出图片（2倍缩放）
-    zoom = 2.0
-    mat = fitz.Matrix(zoom, zoom)
-    pix = page.get_pixmap(matrix=mat)
-    
-    # 保存为PNG图片
-    image_filename = f"page_{page_num}.png"
-    image_path = temp_images_dir / image_filename
-    pix.save(str(image_path))
-    page_images.append(image_path)
-    
-    print(f"页面 {page_num}: 已导出 {image_path}")
-    print(f"  - PDF尺寸: {page.rect.width:.2f} x {page.rect.height:.2f}")
-    print(f"  - 图片尺寸: {pix.width} x {pix.height} pixels")
-    print()
-
+total_pages = len(pdf_document)
 pdf_document.close()
 
-print(f"✓ 共导出 {len(page_images)} 页图片\n")
+# 创建线程锁用于保护共享资源
+export_lock = threading.Lock()
+
+def export_page(page_num):
+    """导出单个页面为图片"""
+    try:
+        # 每个线程需要独立打开PDF
+        doc = fitz.open(pdf_path)
+        page = doc[page_num]
+        
+        # 使用指定的分辨率导出图片
+        mat = fitz.Matrix(args.zoom, args.zoom)
+        pix = page.get_pixmap(matrix=mat)
+        
+        # 保存为PNG图片
+        image_filename = f"page_{page_num}.png"
+        image_path = temp_images_dir / image_filename
+        pix.save(str(image_path))
+        
+        # 获取页面和图片信息
+        pdf_width = page.rect.width
+        pdf_height = page.rect.height
+        img_width = pix.width
+        img_height = pix.height
+        
+        doc.close()
+        
+        with export_lock:
+            print(f"页面 {page_num}: 已导出 {image_path}")
+            print(f"  - PDF尺寸: {pdf_width:.2f} x {pdf_height:.2f}")
+            print(f"  - 图片尺寸: {img_width} x {img_height} pixels")
+            print()
+        
+        return image_path
+    except Exception as e:
+        with export_lock:
+            print(f"✗ 导出页面 {page_num} 失败: {e}")
+            traceback.print_exc()
+        return None
+
+# 使用线程池并发导出所有页面
+page_images = [None] * total_pages  # 预分配列表保持页面顺序
+max_export_workers = min(args.max_workers, total_pages)
+
+print(f"使用 {max_export_workers} 个线程并发导出 {total_pages} 页图片...\n")
+
+with ThreadPoolExecutor(max_workers=max_export_workers) as executor:
+    # 提交所有任务
+    future_to_page = {
+        executor.submit(export_page, page_num): page_num
+        for page_num in range(total_pages)
+    }
+    
+    # 收集结果
+    for future in as_completed(future_to_page):
+        page_num = future_to_page[future]
+        try:
+            image_path = future.result()
+            if image_path:
+                page_images[page_num] = image_path
+        except Exception as e:
+            with export_lock:
+                print(f"✗ 获取页面 {page_num} 导出结果时出错: {e}")
+
+# 过滤掉失败的页面
+page_images = [img for img in page_images if img is not None]
+
+step1_end_time = time.time()
+step1_duration = step1_end_time - step1_start_time
+print(f"\n✓ 共成功导出 {len(page_images)} 页图片")
+print(f"⏱️  第一步耗时: {step1_duration:.2f} 秒\n")
 
 # ==================== 第二步：使用 PaddleX 识别图片中的印章 ====================
+step2_start_time = time.time()
 print("=" * 60)
 print("第二步：使用 PaddleX 识别图片中的印章（多线程并发）")
 print("=" * 60)
@@ -64,7 +141,7 @@ def get_pipeline():
     if not hasattr(thread_local, 'pipeline'):
         with print_lock:
             print(f"[线程 {threading.current_thread().name}] 初始化 pipeline...")
-        thread_local.pipeline = create_pipeline(pipeline="seal_recognition")
+        thread_local.pipeline = create_pipeline(pipeline="SealRecognition.yaml")
     return thread_local.pipeline
 
 # 定义处理单个图片的函数
@@ -79,8 +156,8 @@ def process_image(page_num, image_path):
         
         output = pipeline.predict(
             str(image_path),
-            use_doc_orientation_classify=False,
-            use_doc_unwarping=False,
+            use_doc_orientation_classify=args.use_orientation,
+            use_doc_unwarping=args.use_unwarping,
         )
         
         page_results = []
@@ -109,7 +186,7 @@ def process_image(page_num, image_path):
 
 # 使用线程池并发处理所有图片
 all_results = []
-max_workers = min(4, len(page_images))  # 最多使用4个线程，避免过度并发
+max_workers = min(args.max_workers, len(page_images))  # 根据参数设置线程数，避免过度并发
 
 print(f"\n使用 {max_workers} 个线程并发处理 {len(page_images)} 页图片...")
 
@@ -134,9 +211,13 @@ with ThreadPoolExecutor(max_workers=max_workers) as executor:
 # 按页码排序结果
 all_results.sort(key=lambda x: x['page_num'])
 
-print("\n✓ 识别完成！结果已保存到 ./output/ 目录\n")
+step2_end_time = time.time()
+step2_duration = step2_end_time - step2_start_time
+print(f"\n✓ 识别完成！结果已保存到 ./output/ 目录")
+print(f"⏱️  第二步耗时: {step2_duration:.2f} 秒\n")
 
 # ==================== 第三步：从导出的图片中裁剪印章 ====================
+step3_start_time = time.time()
 print("=" * 60)
 print("第三步：从导出的图片中裁剪印章")
 print("=" * 60)
@@ -229,9 +310,27 @@ for page_num, image_path in enumerate(page_images):
     else:
         print(f"  ✓ 页面 {page_num} 共裁剪 {seal_count} 个印章")
 
+step3_end_time = time.time()
+step3_duration = step3_end_time - step3_start_time
+
 print("\n" + "=" * 60)
 if total_seals == 0:
     print("未找到任何印章")
 else:
     print(f"全部完成！总共裁剪了 {total_seals} 个印章")
+print(f"⏱️  第三步耗时: {step3_duration:.2f} 秒")
+print("=" * 60)
+
+# 计算并显示总耗时
+program_end_time = time.time()
+total_duration = program_end_time - program_start_time
+
+print("\n" + "=" * 60)
+print("⏱️  耗时统计")
+print("=" * 60)
+print(f"  第一步（PDF导出图片）: {step1_duration:.2f} 秒 ({step1_duration/total_duration*100:.1f}%)")
+print(f"  第二步（印章识别）  : {step2_duration:.2f} 秒 ({step2_duration/total_duration*100:.1f}%)")
+print(f"  第三步（印章裁剪）  : {step3_duration:.2f} 秒 ({step3_duration/total_duration*100:.1f}%)")
+print("-" * 60)
+print(f"  总耗时              : {total_duration:.2f} 秒")
 print("=" * 60)

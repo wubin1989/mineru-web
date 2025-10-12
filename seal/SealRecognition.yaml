@@ -1,0 +1,48 @@
+SubModules:
+  LayoutDetection:
+    layout_merge_bboxes_mode: large
+    layout_nms: true
+    layout_unclip_ratio: 1.0
+    model_dir: /Users/doudou/.paddlex/official_models/PP-DocLayout-L
+    model_name: PP-DocLayout-L
+    module_name: layout_detection
+    threshold: 0.5
+SubPipelines:
+  DocPreprocessor:
+    SubModules:
+      DocOrientationClassify:
+        model_dir: /Users/doudou/.paddlex/official_models/PP-LCNet_x1_0_doc_ori
+        model_name: PP-LCNet_x1_0_doc_ori
+        module_name: doc_text_orientation
+      DocUnwarping:
+        model_dir: /Users/doudou/.paddlex/official_models/UVDoc
+        model_name: UVDoc
+        module_name: image_unwarping
+    pipeline_name: doc_preprocessor
+    use_doc_orientation_classify: true
+    use_doc_unwarping: true
+  SealOCR:
+    SubModules:
+      TextDetection:
+        box_thresh: 0.6
+        limit_side_len: 736
+        limit_type: min
+        max_side_len: 4000
+        model_dir: /Users/doudou/.paddlex/official_models/PP-OCRv4_server_seal_det
+        model_name: PP-OCRv4_server_seal_det
+        module_name: seal_text_detection
+        thresh: 0.2
+        unclip_ratio: 0.5
+      TextRecognition:
+        batch_size: 1
+        model_dir: /Users/doudou/.paddlex/official_models/PP-OCRv4_server_rec
+        model_name: PP-OCRv4_server_rec
+        module_name: text_recognition
+        score_thresh: 0
+    pipeline_name: OCR
+    text_type: seal
+    use_doc_preprocessor: false
+    use_textline_orientation: false
+pipeline_name: seal_recognition
+use_doc_preprocessor: true
+use_layout_detection: true
