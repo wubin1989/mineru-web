@@ -1,6 +1,6 @@
 SubModules:
   LayoutDetection:
-    layout_merge_bboxes_mode: large
+    layout_merge_bboxes_mode: small
     layout_nms: true
     layout_unclip_ratio: 1.0
     model_dir: /Users/doudou/.paddlex/official_models/PP-DocLayout-L
