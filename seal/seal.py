@@ -79,6 +79,7 @@ def get_pipeline(args):
         with print_lock:
             print(f"[线程 {threading.current_thread().name}] 初始化 pipeline...")
         thread_local.pipeline = create_pipeline(pipeline="SealRecognition.yaml")
+        # thread_local.pipeline = create_pipeline(pipeline="PaddleOCR-VL") 暂时用不了
     return thread_local.pipeline
 
 def is_image_file(file_path):
