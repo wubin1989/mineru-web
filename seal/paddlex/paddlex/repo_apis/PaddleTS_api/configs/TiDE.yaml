@@ -1,0 +1,41 @@
+batch_size: 32
+seq_len: 720
+predict_len: 96
+do_eval: True
+epoch: 2
+to_static_train: False
+use_amp: False
+amp_level: O2
+
+dataset: 
+  name: TSDataset
+  dataset_root: /data/
+  train_path: /data/train.csv
+  val_path: /data/val.csv
+  time_feat: True
+  use_holiday: True
+  scale: True
+
+info_params:
+  freq: 1h
+  target_cols: "OT"
+  time_col: date
+
+
+model: 
+  name: TiDE
+  model_cfg:
+    c_in: 7
+    num_encoder_layers: 2
+    use_revin: True
+    drop_prob: 0.5
+    hidden_size: 512
+    decoder_output_dim: 32
+    temporal_decoder_hidden: 16
+    optimizer_params:
+      learning_rate: 0.00098
+      gamma: 0.5
+    patience: 10
+
+
+  

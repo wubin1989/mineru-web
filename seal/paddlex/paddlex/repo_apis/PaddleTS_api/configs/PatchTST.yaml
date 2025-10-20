@@ -1,0 +1,40 @@
+batch_size: 32
+seq_len: 96
+predict_len: 96
+do_eval: True
+epoch: 5
+to_static_train: False
+use_amp: False
+amp_level: O2
+
+dataset: 
+  name: TSDataset
+  dataset_root: /data/
+  train_path: /data/train.csv
+  val_path: /data/val.csv
+  time_feat: False
+  scale: True
+
+
+info_params:
+  freq: 1h
+  target_cols: "OT"
+  time_col: date
+
+
+model: 
+  name: PatchTSTModel
+  model_cfg:
+    c_in: 7
+    n_layers: 3
+    n_heads: 4
+    d_model: 16
+    d_ff: 128
+    dropout: 0.3
+    fc_dropout: 0.3
+    head_dropout: 0.0
+    patch_len: 16
+    stride: 8
+    patience: 20
+    optimizer_params:
+      learning_rate: 0.0001
