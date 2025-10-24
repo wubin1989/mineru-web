@@ -13,6 +13,7 @@ import threading
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
+import cv2
 from paddlex.inference.pipelines.base import BasePipeline
 from paddlex.inference.pipelines.components import CropByBoxes
 from paddlex.inference.pipelines.seal_recognition.result import SealRecognitionResult
@@ -23,6 +24,139 @@ from paddlex.inference.utils.benchmark import benchmark
 from paddlex.inference.utils.hpi import HPIConfig
 from paddlex.inference.utils.pp_option import PaddlePredictorOption
 from paddlex.utils import logging
+
+
+def calculate_text_orientation_angle(rec_texts: List[str], textline_orientation_angles: List[int]) -> Tuple[float, Dict]:
+    """
+    根据文字检测结果和文字方向计算印章的实际旋转角度
+    
+    Args:
+        rec_texts: 识别的文本内容列表
+        textline_orientation_angles: 文字行方向角度列表 (0=正常, 1=180度倒置)
+    
+    Returns:
+        - correction_angle: 需要旋转的角度（度，顺时针为正）
+    """
+    if not rec_texts or not textline_orientation_angles:
+        return 0.0, {"normal": 0, "inverted": 0, "total": 0, "confidence": 0.0}
+    
+    # 只统计有效文本行（过滤空字符串）
+    valid_indices = [i for i, text in enumerate(rec_texts) 
+                    if i < len(textline_orientation_angles) and text and text.strip()]
+    
+    if not valid_indices:
+        return 0.0, {"normal": 0, "inverted": 0, "total": 0, "confidence": 0.0}
+    
+    # 统计正常和倒置的文本行数量
+    normal_count = sum(1 for i in valid_indices if textline_orientation_angles[i] == 0)
+    inverted_count = sum(1 for i in valid_indices if textline_orientation_angles[i] == 1)
+    
+    # 判断是否需要旋转180度
+    # 如果倒置文本占多数，需要旋转180度纠正
+    correction_angle = 180.0 if inverted_count > normal_count else 0.0
+    
+    return correction_angle
+
+
+def calculate_seal_angle_with_text(
+    coordinate: List[float],
+    rec_texts: List[str] = None,
+    textline_orientation_angles: List[int] = None
+) -> Dict[str, any]:
+    """
+    综合边界框和文字方向计算印章的旋转角度
+    
+    Args:
+        coordinate: 印章边界框坐标 [x0, y0, x1, y1]
+        rec_texts: 识别的文本内容列表（可选）
+        textline_orientation_angles: 文字行方向角度列表（可选，0=正常，1=180度倒置）
+    
+    Returns:
+        包含角度信息的字典:
+        - correction_angle: 纠正角度（顺时针旋转，0或180度）
+        - is_rotated: 是否需要旋转（是否倒置）
+        - method: 计算方法 ("text" 或 "no_text")
+    """
+    try:
+        result = {
+            "correction_angle": 0.0,
+            "is_rotated": False,
+            "method": "none",
+            "center": [0.0, 0.0],
+            "size": [0.0, 0.0]
+        }
+        
+        # 计算边界框中心和尺寸
+        x0, y0, x1, y1 = coordinate
+        center = [(x0 + x1) / 2, (y0 + y1) / 2]
+        size = [x1 - x0, y1 - y0]
+        result["center"] = center
+        result["size"] = size
+        
+        # 优先使用文字方向判断
+        if rec_texts and textline_orientation_angles:
+            correction_angle = calculate_text_orientation_angle(rec_texts, textline_orientation_angles)
+            
+            result.update({
+                "correction_angle": correction_angle,
+                "is_rotated": correction_angle != 0,
+                "method": "text_orientation",
+            })
+        else:
+            # 如果没有文字信息，假设不需要旋转
+            result.update({
+                "correction_angle": 0.0,
+                "is_rotated": False,
+                "method": "no_text_data"
+            })
+        
+        return result
+        
+    except Exception as e:
+        logging.warning(f"计算印章角度失败: {e}")
+        return {
+            "correction_angle": 0.0,
+            "is_rotated": False,
+            "method": "error",
+            "error": str(e),
+            "center": [0.0, 0.0],
+            "size": [0.0, 0.0]
+        }
+
+
+def rotate_image(image: np.ndarray, angle: float, center: tuple = None) -> np.ndarray:
+    """
+    旋转图像
+    
+    Args:
+        image: 输入图像
+        angle: 旋转角度（顺时针为正，度）
+        center: 旋转中心，如果为None则使用图像中心
+    
+    Returns:
+        旋转后的图像
+    """
+    h, w = image.shape[:2]
+    if center is None:
+        center = (w // 2, h // 2)
+    
+    # 创建旋转矩阵（OpenCV中负角度表示顺时针）
+    M = cv2.getRotationMatrix2D(center, -angle, 1.0)
+    
+    # 计算旋转后的图像尺寸
+    cos = np.abs(M[0, 0])
+    sin = np.abs(M[0, 1])
+    new_w = int(h * sin + w * cos)
+    new_h = int(h * cos + w * sin)
+    
+    # 调整旋转矩阵以适应新尺寸
+    M[0, 2] += (new_w - w) / 2
+    M[1, 2] += (new_h - h) / 2
+    
+    # 应用旋转
+    rotated = cv2.warpAffine(image, M, (new_w, new_h), borderValue=(255, 255, 255))
+    
+    return rotated
 
 
 def parse_args():
@@ -360,7 +494,7 @@ class _CustomSealRecognitionPipeline(BasePipeline):
                             raise ValueError("外部版面检测结果数量不足")
                         layout_det_results.append(layout_det_res)
 
-                # 根据版面检测结果裁剪印章区域
+                # 根据版面检测结果裁剪印章区域，并计算印章角度
                 cropped_imgs = []
                 chunk_indices = [0]
                 for doc_preprocessor_image, layout_det_res in zip(
@@ -368,6 +502,7 @@ class _CustomSealRecognitionPipeline(BasePipeline):
                 ):
                     for box_info in layout_det_res["boxes"]:
                         if box_info["label"].lower() in ["seal"]:
+                            # 裁剪印章区域（角度信息将在OCR后计算）
                             crop_img_info = self._crop_by_boxes(
                                 doc_preprocessor_image, [box_info]
                             )
@@ -394,12 +529,32 @@ class _CustomSealRecognitionPipeline(BasePipeline):
                     for i, j in zip(chunk_indices[:-1], chunk_indices[1:])
                 ]
 
-                # 为每个印章区域添加ID
-                for seal_results_for_img in seal_results:
+                # 为每个印章区域添加ID并计算角度
+                for seal_results_for_img, layout_det_res in zip(seal_results, layout_det_results):
                     seal_region_id = 1
+                    seal_index = 0
+                    
+                    # 找到layout_det_res中的印章框
+                    seal_boxes = [box for box in layout_det_res.get("boxes", []) if box.get("label", "").lower() == "seal"]
+                    
                     for seal_res in seal_results_for_img:
                         seal_res["seal_region_id"] = seal_region_id
+                        
+                        # 为对应的印章框添加角度信息
+                        if seal_index < len(seal_boxes):
+                            box_info = seal_boxes[seal_index]
+                            
+                            # 基于OCR文本方向计算角度
+                            angle_info = calculate_seal_angle_with_text(
+                                coordinate=box_info["coordinate"],
+                                rec_texts=seal_res.get("rec_texts", []),
+                                textline_orientation_angles=seal_res.get("textline_orientation_angles", [])
+                            )
+                            
+                            box_info["angle_info"] = angle_info
+                        
                         seal_region_id += 1
+                        seal_index += 1
 
             # 构造结果
             for (
@@ -724,6 +879,7 @@ def process_file(file_path, output_dir, args):
                 seal_count += 1
                 coordinate = box["coordinate"]
                 score = box["score"]
+                angle_info = box.get("angle_info", {})
                 
                 # coordinate 格式: [x0, y0, x1, y1]
                 x0, y0, x1, y1 = coordinate
@@ -737,6 +893,17 @@ def process_file(file_path, output_dir, args):
                 print(f"  印章 {seal_count}:")
                 print(f"    - 坐标: [{x0:.2f}, {y0:.2f}, {x1:.2f}, {y1:.2f}]")
                 print(f"    - 置信度: {score:.4f}")
+                
+                # 显示角度信息
+                if angle_info:
+                    rot_angle = angle_info.get('rotation_angle', 0)
+                    corr_angle = angle_info.get('correction_angle', 0)
+                    print(f"    - 旋转角度: {rot_angle:.2f}° (逆时针)")
+                    print(f"    - 纠正角度: {corr_angle:.2f}° (顺时针)")
+                    if angle_info.get('is_rotated', False):
+                        print(f"    - 状态: 有旋转")
+                    else:
+                        print(f"    - 状态: 无旋转（正向）")
                 
                 try:
                     # 转换为整数坐标并确保在图片范围内
@@ -757,13 +924,34 @@ def process_file(file_path, output_dir, args):
                     # 从图片中裁剪印章区域
                     seal_img = page_image.crop((x0, y0, x1, y1))
                     
-                    # 保存图片
+                    # 检查是否需要旋转纠正
+                    if angle_info and angle_info.get('is_rotated', False):
+                        correction_angle = angle_info.get('correction_angle', 0)
+                        print(f"    - 应用旋转纠正: {correction_angle}°")
+                        
+                        # 将PIL图片转换为numpy数组
+                        seal_img_np = np.array(seal_img)
+                        
+                        # 应用旋转
+                        seal_img_rotated = rotate_image(seal_img_np, correction_angle)
+                        
+                        # 转换回PIL图片
+                        seal_img = Image.fromarray(seal_img_rotated)
+                        print(f"    - 纠正后尺寸: {seal_img.width}x{seal_img.height} pixels")
+                    
+                    # 保存原始裁剪图片（未纠正）
+                    output_filename_orig = f"seal_cropped_page{page_num}_{seal_count}_score{score:.3f}_orig.png"
+                    output_path_orig = output_dir / output_filename_orig
+                    page_image.crop((x0, y0, x1, y1)).save(str(output_path_orig))
+                    
+                    # 保存纠正后的图片
                     output_filename = f"seal_cropped_page{page_num}_{seal_count}_score{score:.3f}.png"
                     output_path = output_dir / output_filename
                     seal_img.save(str(output_path))
                     
-                    print(f"    ✓ 已保存: {output_path}")
-                    print(f"    - 尺寸: {seal_img.width}x{seal_img.height} pixels")
+                    print(f"    ✓ 已保存原始: {output_path_orig}")
+                    print(f"    ✓ 已保存纠正后: {output_path}")
+                    print(f"    - 最终尺寸: {seal_img.width}x{seal_img.height} pixels")
                     
                     total_seals += 1
                     
